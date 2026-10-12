@@ -7,8 +7,8 @@ from planner import plan_storyboard
 from generator import generate_prompts_pdf, build_image_prompt
 
 st.set_page_config(page_title="AI Storyboard Generator", layout="wide")
-st.title("🎬 Educational Storyboard Pipeline")
-st.write("Upload your script file (.docx/.pdf) and visual reference file (.pdf/.docx) to generate master storyboard prompts.")
+st.title("🎬 Multimodal Educational Storyboard Pipeline")
+st.write("Upload your script file (.docx/.pdf), visual reference file (.pdf/.docx), and client Hindi video/audio instructions (.mp4/.mp3).")
 
 input_dir = "input"
 output_dir = "output"
@@ -35,9 +35,11 @@ if st.sidebar.button("🧹 Clear Workspace"):
 
 uploaded_script = st.sidebar.file_uploader("1. Script Document (.docx / .pdf)", type=["docx", "pdf"])
 uploaded_ref_doc = st.sidebar.file_uploader("2. Visual Reference File (.pdf / .docx)", type=["pdf", "docx"])
+uploaded_media = st.sidebar.file_uploader("3. Client Hindi Video / Audio Instructions (.mp4 / .mp3 / .m4a)", type=["mp4", "mp3", "m4a"])
 
 script_saved_path = None
 ref_doc_saved_path = None
+media_saved_path = None
 
 if uploaded_script:
     script_saved_path = os.path.join(input_dir, uploaded_script.name)
@@ -51,14 +53,20 @@ if uploaded_ref_doc:
         f.write(uploaded_ref_doc.getbuffer())
     st.sidebar.success(f"Ref File: {uploaded_ref_doc.name}")
 
+if uploaded_media:
+    media_saved_path = os.path.join(input_dir, uploaded_media.name)
+    with open(media_saved_path, "wb") as f:
+        f.write(uploaded_media.getbuffer())
+    st.sidebar.success(f"Media File: {uploaded_media.name}")
+
 plan_file_path = os.path.join(output_dir, "current_panel_plan.json")
 
 # --- PARSE AND PLAN ACTION ---
 if script_saved_path:
     if st.sidebar.button("🚀 Parse & Generate Plan"):
-        with st.spinner("Extracting script beats and generating fine-grained panel plan..."):
+        with st.spinner("Extracting audio/script beats and generating video-aligned panel plan..."):
             parsed_data = parse_script_to_panels(script_saved_path, ref_doc_saved_path)
-            panel_data = plan_storyboard(parsed_data)
+            panel_data = plan_storyboard(parsed_data, media_file_path=media_saved_path)
 
             with open(plan_file_path, "w", encoding="utf-8") as f:
                 json.dump(panel_data, f, indent=2)
@@ -129,4 +137,4 @@ if os.path.exists(plan_file_path):
 
         st.divider()
 else:
-    st.info("👈 Upload your script and reference file in the sidebar, then click 'Parse & Generate Plan'.")
+    st.info("👈 Upload your script, reference file, and Hindi instruction video in the sidebar, then click 'Parse & Generate Plan'.")

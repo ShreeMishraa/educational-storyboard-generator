@@ -1,8 +1,8 @@
-google-genai
+streamlit
+fpdf
 python-docx
 pypdf
+google-genai
 python-dotenv
-streamlit
 pydantic
-requests
-fpdf2
+moviepy

@@ -1,16 +1,17 @@
 """
-Brick 2: Script -> Fine-Grained Storyboard Panel Plan.
-Generates comprehensive, highly descriptive visual details for every panel
-without modifying the core JSON schema or pipeline structure.
+Brick 2: Multimodal Script & Video Storyboard Director.
+Parses script input alongside uploaded Hindi client instruction audio/video files
+using gemini-2.5-flash or gemini-2.0-flash.
 """
 
 import os
+import time
 import json
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-from parser import parse_script_to_panels
+from parser import parse_script_to_panels, extract_audio_from_video
 
 load_dotenv()
 
@@ -23,19 +24,19 @@ class TextOverlay(BaseModel):
 class PresenterSpec(BaseModel):
     is_present: bool = Field(description="Whether presenter is visually visible in frame")
     audio_mode: str = Field(description="SYNC, V.O., or NA")
-    position: str = Field(description="center, left_third, right_third, or NA")
+    position: str = Field(description="center, left_third, or NA")
     dialogue: str = Field(description="Exact presenter line spoken in this frame, or NA")
 
 
 class CanvasLayout(BaseModel):
     layout_mode: str = Field(description="full_bleed, presenter_with_mog_inset, split_2way, split_3way, title_card")
-    visual_description: str = Field(description="Rich, highly descriptive visual composition outlining subjects, background elements, specific props, character positioning, overlays, and camera focus")
+    visual_description: str = Field(description="Rich visual composition describing characters, props, background, zoom levels, overlays, and action strictly derived from the script and client video")
 
 
 class PanelPlanItem(BaseModel):
     panel_id: int = Field(description="Sequential 1-based panel number")
     shot_type: str = Field(description="Mid Shot, FSA, MOG, Title card, Summary, Split screen, Close Up")
-    scene: str = Field(description="Scene slugline e.g. INT. STUDIO - DAY or INT. CLASSROOM - DAY or EXT. RIVER PLAINS - DAY or NA")
+    scene: str = Field(description="Scene slugline extracted or inferred from script e.g. INT. STUDIO - DAY, INT. CLASSROOM - DAY, EXT. LOCATION - DAY, or NA")
     presenter: PresenterSpec
     canvas_layout: CanvasLayout
     text_overlays: List[TextOverlay] = Field(default_factory=list)
@@ -49,29 +50,21 @@ class StoryboardPlan(BaseModel):
     panels: List[PanelPlanItem]
 
 
-DESCRIPTIVE_STORYBOARD_PROMPT = """
-You are a master educational storyboard director. Convert the input script into a highly granular, frame-by-frame storyboard panel plan (~55 to 65 panels for a standard script).
+GENERIC_STORYBOARD_DIRECTOR_PROMPT = """
+You are a professional educational storyboard director. You have been provided a script document and an attached client explanation file (containing spoken Hindi instructions/video explanations).
 
-CRITICAL DIRECTORIAL REQUIREMENTS:
-
-1. HIGHLY DESCRIPTIVE VISUAL DETAILS:
-   - Provide rich, specific visual descriptions for every single panel. Specify exact background details, foreground objects, character actions, prop labels, magnifying glass overlays, and camera framing so the image generator produces rich, informative line art.
-
-2. SUB-ACTION BREAKDOWNS:
-   - Break sequential physical actions into separate consecutive panels.
-
-3. PROGRESSIVE BULLET BUILDS (MOG OVERLAYS):
-   - Every time a list or bullet point is spoken, create a NEW panel for each added item.
-
-4. SPLIT-SCREEN COMPARISONS:
-   - When comparing items (e.g. Wet vs Dry soil, Millets vs Pulses), assign layout_mode 'split_2way' or 'split_3way' with explicit side-by-side visual notes for each section.
-
-5. ACCURATE SCENE SLUGLINES:
-   - Use proper scene slugs: INT. CLASSROOM - DAY, INT. STUDIO - DAY, EXT. RIVER PLAINS - DAY, EXT. DECCAN PLATEAU - DAY, EXT. THAR DESERT - DAY, EXT. HIMALAYAN FOOTHILLS - DAY, or NA.
+STRICT DIRECTORIAL RULES:
+1. Listen carefully to the attached client spoken Hindi instructions. Extract every specific requirement mentioned by the client (layout, asset placement, color choices vs. line-art, character gestures, graphic cards).
+2. Cross-reference the Hindi client instructions with the written script beats to build a granular frame-by-frame storyboard (~55 to 65 panels for a standard educational script).
+3. Break down physical multi-step actions into consecutive individual panels.
+4. Every time a list item or bullet point is spoken, create a dedicated build panel showing progressive on-screen text/graphic additions.
+5. If comparisons or split visuals are described, assign layout_mode 'split_2way' or 'split_3way'.
+6. Translate dynamic motion notes (camera zooms, icon popups) into static video-frame visual diagrams (highlight glows, thought bubbles, arrows, crossed icons).
+7. Ensure seamless character, prop, and setting continuity across consecutive panels so the images can be compiled directly into a video.
 """
 
 
-def plan_storyboard(parsed_doc: dict, client=None, model_name: Optional[str] = None) -> Dict[str, Any]:
+def plan_storyboard(parsed_doc: dict, media_file_path: Optional[str] = None, client=None, model_name: Optional[str] = None) -> Dict[str, Any]:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your_actual_api_key_here":
         return {
@@ -85,26 +78,51 @@ def plan_storyboard(parsed_doc: dict, client=None, model_name: Optional[str] = N
         client = genai.Client(api_key=api_key)
 
     if model_name is None:
-        model_name = os.getenv("GEMINI_MODEL", "gemini-3.1-flash")
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     paragraphs = parsed_doc.get("raw_paragraphs", [])
     ref_images_map = parsed_doc.get("ref_images_map", {})
-
     script_text = "\n".join(paragraphs)
-    prompt = f"{DESCRIPTIVE_STORYBOARD_PROMPT}\n\n=== SOURCE SCRIPT ===\n{script_text}"
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": StoryboardPlan,
-            "temperature": 0.2
-        }
-    )
+    contents = []
 
-    plan_dict = json.loads(response.text)
+    # Upload extracted audio/video to Gemini Files API if provided
+    uploaded_file = None
+    if media_file_path and os.path.exists(media_file_path):
+        audio_file_path = extract_audio_from_video(media_file_path)
+        print(f"Uploading media file to Gemini API: {audio_file_path}...")
+        uploaded_file = client.files.upload(file=audio_file_path)
+        
+        # Wait until file processing completes if necessary
+        while uploaded_file.state.name == "PROCESSING":
+            time.sleep(2)
+            uploaded_file = client.files.get(name=uploaded_file.name)
 
+        contents.append(uploaded_file)
+
+    prompt = f"{GENERIC_STORYBOARD_DIRECTOR_PROMPT}\n\n=== SOURCE SCRIPT ===\n{script_text}"
+    contents.append(prompt)
+
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": StoryboardPlan,
+                "temperature": 0.1
+            }
+        )
+        plan_dict = json.loads(response.text)
+    finally:
+        # Clean up uploaded file from Gemini storage
+        if uploaded_file:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
+
+    # Attach extracted reference image paths
     for panel in plan_dict.get("panels", []):
         ref_paths = []
         for r in panel.get("references", []):

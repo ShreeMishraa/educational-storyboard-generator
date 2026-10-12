@@ -1,6 +1,7 @@
 """
-Brick 1: Universal Script Document Parser & Reference Image Extractor.
-Extracts script beats, metadata, tables, and embedded reference images from ANY uploaded .docx/.pdf.
+Brick 1: Script Document Parser, Reference Extractor, and Local Audio Converter.
+Parses script documents (.docx or .pdf), extracts reference images, and locally
+converts large MP4 files into lightweight MP3 audio tracks.
 """
 
 import os
@@ -15,10 +16,16 @@ try:
 except ImportError:
     pypdf = None
 
+try:
+    from moviepy.editor import VideoFileClip
+except ImportError:
+    VideoFileClip = None
+
 
 def clean_parsed_text(text: str) -> str:
     if not text:
         return ""
+    text = re.sub(r"\b(clear|lush|ripe|green)\s+\1\b", r"\1", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -68,6 +75,30 @@ def parse_pdf(file_path: str) -> dict:
     return {"file_name": os.path.basename(file_path), "metadata": {}, "elements": elements}
 
 
+def extract_audio_from_video(video_path: str, output_audio_dir: str = "input") -> str:
+    """Extracts lightweight MP3 audio from large MP4 files to bypass bandwidth limits."""
+    if not video_path or not os.path.exists(video_path):
+        return None
+
+    ext = os.path.splitext(video_path)[1].lower()
+    if ext in [".mp3", ".m4a", ".wav"]:
+        return video_path  # Already audio
+
+    if VideoFileClip is None:
+        print("Warning: moviepy is not installed. Sending raw video file.")
+        return video_path
+
+    audio_output_path = os.path.join(output_audio_dir, "extracted_client_instructions.mp3")
+    try:
+        clip = VideoFileClip(video_path)
+        clip.audio.write_audiofile(audio_output_path, logger=None)
+        clip.close()
+        return audio_output_path
+    except Exception as e:
+        print(f"Error extracting audio: {e}. Falling back to original video file.")
+        return video_path
+
+
 def extract_reference_images(ref_path: str, output_dir: str = "output/refs") -> dict:
     if not ref_path or not os.path.exists(ref_path):
         return {}
@@ -112,13 +143,13 @@ def parse_script_to_panels(script_path: str, ref_path: str = None) -> dict:
     parsed_paragraphs = []
     for el in elements:
         text = el["text"].strip()
-        if not text or "For Internal Use Only" in text:
+        if not text:
             continue
         parsed_paragraphs.append(text)
 
     return {
-        "title": metadata.get("Title", "Educational Storyboard Script"),
-        "script_code": metadata.get("Script Code", "GENERIC_01"),
+        "title": metadata.get("Title", os.path.basename(script_path)),
+        "script_code": metadata.get("Script Code", "v1.0"),
         "raw_paragraphs": parsed_paragraphs,
         "ref_images_map": ref_images_map
     }
