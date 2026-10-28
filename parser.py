@@ -22,6 +22,11 @@ except ImportError:
     VideoFileClip = None
 
 
+# Max video file size (in bytes) to upload directly to Gemini.
+# If the video exceeds this, extract audio only to save bandwidth/tokens.
+MAX_DIRECT_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+
+
 def clean_parsed_text(text: str) -> str:
     if not text:
         return ""
@@ -97,6 +102,22 @@ def extract_audio_from_video(video_path: str, output_audio_dir: str = "input") -
     except Exception as e:
         print(f"Error extracting audio: {e}. Falling back to original video file.")
         return video_path
+
+
+def should_upload_video_directly(media_path: str) -> bool:
+    """
+    Decides whether to upload the raw video directly (so Gemini sees frames + hears audio)
+    or fall back to audio-only extraction (cheaper for very large files).
+
+    Returns True if the file is a video AND small enough for direct upload.
+    """
+    if not media_path or not os.path.exists(media_path):
+        return False
+    ext = os.path.splitext(media_path)[1].lower()
+    if ext not in [".mp4", ".avi", ".mov", ".mkv", ".webm"]:
+        return False  # Not a video
+    file_size = os.path.getsize(media_path)
+    return file_size <= MAX_DIRECT_VIDEO_UPLOAD_BYTES
 
 
 def extract_reference_images(ref_path: str, output_dir: str = "output/refs") -> dict:

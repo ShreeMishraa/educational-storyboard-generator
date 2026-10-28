@@ -64,12 +64,19 @@ plan_file_path = os.path.join(output_dir, "current_panel_plan.json")
 # --- PARSE AND PLAN ACTION ---
 if script_saved_path:
     if st.sidebar.button("🚀 Parse & Generate Plan"):
-        with st.spinner("Extracting audio/script beats and generating video-aligned panel plan..."):
-            parsed_data = parse_script_to_panels(script_saved_path, ref_doc_saved_path)
-            panel_data = plan_storyboard(parsed_data, media_file_path=media_saved_path)
+        progress = st.progress(0, text="Starting multimodal analysis...")
 
-            with open(plan_file_path, "w", encoding="utf-8") as f:
-                json.dump(panel_data, f, indent=2)
+        progress.progress(10, text="📄 Parsing script document...")
+        parsed_data = parse_script_to_panels(script_saved_path, ref_doc_saved_path)
+
+        progress.progress(25, text="🎥 Uploading media & analyzing with Gemini (single API call)...")
+        panel_data = plan_storyboard(parsed_data, media_file_path=media_saved_path)
+
+        progress.progress(90, text="💾 Saving storyboard plan...")
+        with open(plan_file_path, "w", encoding="utf-8") as f:
+            json.dump(panel_data, f, indent=2)
+
+        progress.progress(100, text="✅ Done!")
 
         st.success(f"Successfully generated {panel_data['total_panels']} panels for '{uploaded_script.name}'!")
         st.rerun()
@@ -106,18 +113,22 @@ if os.path.exists(plan_file_path):
         pid = panel["panel_id"]
         ref_imgs = panel.get("ref_image_paths", [])
         prompt_text = build_image_prompt(panel)
+        client_notes = panel.get("client_visual_notes", "")
 
         st.markdown(f"### Panel {pid:03d} — {panel['shot_type']} ({panel['scene']})")
 
         c1, c2, c3 = st.columns([1, 1, 1])
 
-        # Column 1: Client Reference Image
+        # Column 1: Client Reference Image + Client Direction Notes
         with c1:
             st.write("**Client Reference Image:**")
             if ref_imgs and os.path.exists(ref_imgs[0]):
                 st.image(ref_imgs[0], caption=f"Reference ({panel['references'][0]})")
             else:
                 st.caption("No reference image attached.")
+
+            if client_notes:
+                st.info(f"🎬 **Client Direction:** {client_notes}")
 
         # Column 2: Copy-Paste Prompt Box
         with c2:

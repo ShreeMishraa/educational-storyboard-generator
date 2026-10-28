@@ -1,7 +1,12 @@
 """
 Brick 2: Multimodal Script & Video Storyboard Director.
-Parses script input alongside uploaded Hindi client instruction audio/video files
-using gemini-2.5-flash or gemini-2.0-flash.
+Uploads the client's briefing video DIRECTLY to Gemini Files API so it can
+see the slides AND hear the Hindi audio in a SINGLE generate_content call.
+
+Free-tier optimized:
+  - 1 file upload  (video or audio)
+  - 1 generate_content call
+  = 2 total API interactions
 """
 
 import os
@@ -11,7 +16,11 @@ from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-from parser import parse_script_to_panels, extract_audio_from_video
+from parser import (
+    parse_script_to_panels,
+    extract_audio_from_video,
+    should_upload_video_directly,
+)
 
 load_dotenv()
 
@@ -30,7 +39,13 @@ class PresenterSpec(BaseModel):
 
 class CanvasLayout(BaseModel):
     layout_mode: str = Field(description="full_bleed, presenter_with_mog_inset, split_2way, split_3way, title_card")
-    visual_description: str = Field(description="Rich visual composition describing characters, props, background, zoom levels, overlays, and action strictly derived from the script and client video")
+    visual_description: str = Field(
+        description="Exhaustive visual composition describing EVERY element the client "
+        "showed or described: exact characters, props, backgrounds, color palettes, "
+        "graphic card layouts, icon placements, text badge positions, zoom levels, "
+        "arrows, highlights, and all action — strictly derived from matching the "
+        "client video frames and Hindi audio instructions to the script."
+    )
 
 
 class PanelPlanItem(BaseModel):
@@ -41,6 +56,11 @@ class PanelPlanItem(BaseModel):
     canvas_layout: CanvasLayout
     text_overlays: List[TextOverlay] = Field(default_factory=list)
     references: List[str] = Field(default_factory=list, description="Reference tags e.g. ['ref 1']")
+    client_visual_notes: str = Field(
+        default="",
+        description="Direct notes from the client video/audio about how this specific "
+        "panel should look — transcribed or paraphrased from the Hindi instructions."
+    )
 
 
 class StoryboardPlan(BaseModel):
@@ -50,21 +70,56 @@ class StoryboardPlan(BaseModel):
     panels: List[PanelPlanItem]
 
 
-GENERIC_STORYBOARD_DIRECTOR_PROMPT = """
-You are a professional educational storyboard director. You have been provided a script document and an attached client explanation file (containing spoken Hindi instructions/video explanations).
+MULTIMODAL_STORYBOARD_DIRECTOR_PROMPT = """
+You are a professional educational storyboard director. You have been given:
+  1. A written SCRIPT document with scene directions, visual cues (FSA, MOG, TOS badges, split screens), and presenter dialogue.
+  2. A CLIENT BRIEFING VIDEO / AUDIO file — the client explains in Hindi exactly how each scene should look, showing slides and visual references on screen while speaking.
 
-STRICT DIRECTORIAL RULES:
-1. Listen carefully to the attached client spoken Hindi instructions. Extract every specific requirement mentioned by the client (layout, asset placement, color choices vs. line-art, character gestures, graphic cards).
-2. Cross-reference the Hindi client instructions with the written script beats to build a granular frame-by-frame storyboard (~55 to 65 panels for a standard educational script).
-3. Break down physical multi-step actions into consecutive individual panels.
-4. Every time a list item or bullet point is spoken, create a dedicated build panel showing progressive on-screen text/graphic additions.
-5. If comparisons or split visuals are described, assign layout_mode 'split_2way' or 'split_3way'.
-6. Translate dynamic motion notes (camera zooms, icon popups) into static video-frame visual diagrams (highlight glows, thought bubbles, arrows, crossed icons).
-7. Ensure seamless character, prop, and setting continuity across consecutive panels so the images can be compiled directly into a video.
+YOUR TASK — STRICT RULES:
+
+A) WATCH + LISTEN CAREFULLY:
+   - If a VIDEO file is attached: examine the visual frames (they show the client's desired slide layouts, reference artwork, graphic compositions). ALSO listen to the Hindi audio track for the client's spoken instructions.
+   - If only AUDIO is attached: listen to the complete Hindi audio — the client explains shot-by-shot what they want.
+   - Cross-reference what you SEE and HEAR with the written script. The client's briefing follows the script sequentially.
+
+B) MATCH CLIENT INSTRUCTIONS TO SCRIPT BEATS:
+   - Map each segment of the client's video/audio explanation to the corresponding section of the written script.
+   - When the client describes a specific visual (e.g., "yahan pe ek airplane dikhana hai", "is slide mein split screen hoga"), capture that EXACT instruction and apply it to the matching script beat.
+   - If the client shows a specific reference image or slide layout on screen, describe that EXACT visual composition in the panel's visual_description — do NOT invent your own layout.
+
+C) PANEL GENERATION RULES:
+   1. Generate one panel for every distinct visual beat. A "beat" changes whenever:
+      - The visual composition changes (new graphic, new layout, new character position)
+      - A new text overlay (TOS badge) appears on screen
+      - The script explicitly marks a new scene (FSA, MOG, INSERT, TOS directive)
+      - The client describes a new visual element appearing
+   2. For multi-step sequences (progressive bullet builds, step-by-step reveals), create SEPARATE consecutive panels for each step.
+   3. Break physical actions into individual panels.
+   4. Capture EVERY TOS badge text EXACTLY as written in the script.
+
+D) VISUAL DESCRIPTION QUALITY:
+   - Each panel's visual_description must be a COMPLETE, self-contained image prompt.
+   - Include: exact subject(s), pose/action/expression, clothing, props, background, color palette, lighting, camera framing, graphic overlays, arrows, icons, text badges, and layout structure.
+   - If the client showed a specific style (colorful illustration, line art, monochrome), state that explicitly.
+   - NEVER use vague descriptions like "appropriate visual" or "relevant image". Be exhaustively specific.
+
+E) CLIENT VISUAL NOTES:
+   - For each panel, populate client_visual_notes with what the client specifically said (paraphrased Hindi to English) about that visual.
+
+F) CONTINUITY:
+   - Maintain character appearance, clothing, setting, and prop consistency across panels.
+
+Generate approximately 55-75 panels for a standard educational script. Output valid JSON matching the schema.
 """
 
 
-def plan_storyboard(parsed_doc: dict, media_file_path: Optional[str] = None, client=None, model_name: Optional[str] = None) -> Dict[str, Any]:
+def plan_storyboard(
+    parsed_doc: dict,
+    media_file_path: Optional[str] = None,
+    client=None,
+    model_name: Optional[str] = None
+) -> Dict[str, Any]:
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your_actual_api_key_here":
         return {
@@ -85,22 +140,53 @@ def plan_storyboard(parsed_doc: dict, media_file_path: Optional[str] = None, cli
     script_text = "\n".join(paragraphs)
 
     contents = []
-
-    # Upload extracted audio/video to Gemini Files API if provided
     uploaded_file = None
+
+    # --- SINGLE FILE UPLOAD STRATEGY (free-tier optimized) ---
+    #
+    # Option A: Video is small enough → upload the MP4 directly.
+    #           Gemini sees the frames AND hears the audio in one file.
+    #           Cost: 1 upload + 1 generate_content = 2 API calls total.
+    #
+    # Option B: Video is too large OR file is audio-only → extract MP3,
+    #           upload that. Gemini hears the instructions but doesn't
+    #           see the slides. Still 1 upload + 1 generate = 2 API calls.
+
     if media_file_path and os.path.exists(media_file_path):
-        audio_file_path = extract_audio_from_video(media_file_path)
-        print(f"Uploading media file to Gemini API: {audio_file_path}...")
-        uploaded_file = client.files.upload(file=audio_file_path)
-        
-        # Wait until file processing completes if necessary
+        if should_upload_video_directly(media_file_path):
+            # OPTION A: Direct video upload — full multimodal (frames + audio)
+            file_to_upload = media_file_path
+            file_size_mb = os.path.getsize(media_file_path) / (1024 * 1024)
+            print(f"Uploading video directly to Gemini ({file_size_mb:.1f} MB) — AI will see slides + hear audio...")
+            contents.append(
+                "[CLIENT BRIEFING VIDEO] This video contains the client's screen recording "
+                "where they walk through the script. WATCH the visual frames — they show the "
+                "exact slide layouts, graphic compositions, and reference art the client wants. "
+                "LISTEN to the Hindi audio — the client explains each scene's requirements. "
+                "Match what you see and hear to the script below."
+            )
+        else:
+            # OPTION B: Extract audio only (large video or audio-only file)
+            file_to_upload = extract_audio_from_video(media_file_path)
+            print(f"Uploading audio to Gemini — AI will hear Hindi instructions...")
+            contents.append(
+                "[CLIENT HINDI AUDIO] Listen to the COMPLETE audio. The client explains in "
+                "Hindi how each scene should look — visual elements, character placements, "
+                "graphic styles, colors, and layout preferences. Match the instructions to "
+                "the script below."
+            )
+
+        uploaded_file = client.files.upload(file=file_to_upload)
+
+        # Wait until file processing completes
         while uploaded_file.state.name == "PROCESSING":
             time.sleep(2)
             uploaded_file = client.files.get(name=uploaded_file.name)
 
         contents.append(uploaded_file)
 
-    prompt = f"{GENERIC_STORYBOARD_DIRECTOR_PROMPT}\n\n=== SOURCE SCRIPT ===\n{script_text}"
+    # Add the script text and director prompt
+    prompt = f"{MULTIMODAL_STORYBOARD_DIRECTOR_PROMPT}\n\n=== SOURCE SCRIPT ===\n{script_text}"
     contents.append(prompt)
 
     try:
